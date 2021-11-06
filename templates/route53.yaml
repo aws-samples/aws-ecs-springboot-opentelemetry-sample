@@ -1,0 +1,23 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+
+Parameters:
+
+  VpcId:
+    Type: String
+
+  PrivateDomain:
+    Type: String
+
+Resources:
+
+  PrivateNamespace:
+    Type: AWS::ServiceDiscovery::PrivateDnsNamespace
+    Properties:
+      Name: !Ref PrivateDomain
+      Vpc: !Ref VpcId
+
+Outputs:
+  PrivateNamespaceId:
+    Value: !GetAtt PrivateNamespace.Id
+

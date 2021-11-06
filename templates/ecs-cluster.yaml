@@ -1,0 +1,16 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Resources:
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref AWS::StackName
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+Outputs:
+  ClusterName:
+    Value: !Ref Cluster

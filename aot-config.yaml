@@ -1,0 +1,57 @@
+extensions:
+  health_check:
+  pprof:
+    endpoint: 0.0.0.0:1777
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:55681
+  awsxray:
+    endpoint: 0.0.0.0:2000
+    transport: udp
+  statsd:
+    endpoint: 0.0.0.0:8125
+    aggregation_interval: 60s
+  awsecscontainermetrics:
+    collection_interval: 60s
+
+processors:
+  filter:
+    metrics:
+      include:
+        match_type: strict
+        metric_names:
+          - ecs.task.memory.utilized
+          - ecs.task.memory.reserved
+          - ecs.task.cpu.utilized
+          - ecs.task.cpu.reserved
+          - ecs.task.network.rate.rx
+          - ecs.task.network.rate.tx
+          - ecs.task.storage.read_bytes
+          - ecs.task.storage.write_bytes
+
+exporters:
+  logging:
+    loglevel: info
+  awsxray:
+    region: ${AWS::Region}
+  awsemf:
+    region: ${AWS::Region}
+  awsprometheusremotewrite:
+    endpoint: ${PrometheusEndpoint}api/v1/remote_write
+    aws_auth:
+      region: ${AWS::Region}
+      service: "aps"
+
+service:
+  pipelines:
+    traces:
+      receivers: [ otlp ]
+      exporters: [ awsxray ]
+    metrics:
+      receivers: [ otlp ]
+      exporters: [ awsemf, awsprometheusremotewrite ]

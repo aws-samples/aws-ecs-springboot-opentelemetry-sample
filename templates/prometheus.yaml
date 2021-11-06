@@ -1,0 +1,16 @@
+AWSTemplateFormatVersion: 2010-09-09
+Resources:
+
+  Prometheus:
+    Type: AWS::APS::Workspace
+    Properties:
+      Alias: !Sub Demo-${AWS::StackName}
+
+Outputs:
+  PrometheusArn:
+    Value:
+      Ref: Prometheus
+
+  PrometheusEndpoint:
+    Value:
+      !GetAtt Prometheus.PrometheusEndpoint

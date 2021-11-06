@@ -1,0 +1,122 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+
+  AppName:
+    Type: String
+
+  AppPort:
+    Type: Number
+
+  VpcId:
+    Type: String
+
+  Cluster:
+    Type: String
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+
+  TargetGroup:
+    Type: String
+
+  SourceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup::Id
+
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+
+  OtelDomain:
+    Type: String
+
+
+Resources:
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${AWS::StackName}-alb
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !Ref SourceSecurityGroup
+          IpProtocol: TCP
+          FromPort: !Ref AppPort
+          ToPort: !Ref AppPort
+      VpcId: !Ref VpcId
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/${AppName}
+      RetentionInDays: 14
+
+  FargateService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub ${AppName}-service-${AWS::StackName}
+      Cluster: !Ref Cluster
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      PlatformVersion: 1.4.0
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref SecurityGroup
+          Subnets: !Ref Subnets
+      HealthCheckGracePeriodSeconds: 90
+      LoadBalancers:
+        - ContainerName: !Ref AppName
+          ContainerPort: !Ref AppPort
+          TargetGroupArn: !Ref TargetGroup
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${AppName}-taskdef-${AWS::StackName}
+      RequiresCompatibilities:
+      - FARGATE
+      Memory: 512
+      Cpu: 256
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: !Ref AppName
+          Image: utsabroy86/springboot-otel-sample:latest # Image is created using Docker file and pushed to Docker hub to allow CF to create the service
+          Essential: true
+          Memory: 512
+          PortMappings:
+            - ContainerPort: !Ref AppPort
+          Environment:
+            - Name: OTEL_EXPORTER_OTLP_ENDPOINT
+              Value: !Sub 'http://${OtelDomain}:4317'
+            - Name: OTEL_RESOURCE_ATTRIBUTES
+              Value: !Sub service.name=${AppName},service.namespace=${AppName}
+            - Name: OTEL_IMR_EXPORT_INTERVAL
+              Value: 10000
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix: ecs
+
+
+Outputs:
+  Service:
+    Value: !Ref FargateService

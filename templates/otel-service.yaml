@@ -1,0 +1,257 @@
+---
+AWSTemplateFormatVersion: 2010-09-09
+
+Mappings:
+  Otel:
+    Ports:
+      grpc: '4317'
+      xray: '2000'
+      stastd: '8125'
+
+Parameters:
+
+  AppName:
+    Type: String
+
+  VpcCIDR:
+    Type: String
+
+  VpcId:
+    Type: String
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+
+  Cluster:
+    Type: String
+
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+
+  PrivateNamespaceId:
+    Type: String
+
+  PrometheusEndpoint:
+    Type: String
+
+
+Resources:
+
+  AotConfigParameter:
+    Type: "AWS::SSM::Parameter"
+    Properties:
+      Name: /aot/config
+      Type: String
+      Tier: "Advanced"
+      Value: !Sub |
+        extensions:
+          health_check:
+          pprof:
+            endpoint: 0.0.0.0:1777
+
+        receivers:
+          otlp:
+            protocols:
+              grpc:
+                endpoint: 0.0.0.0:4317
+              http:
+                endpoint: 0.0.0.0:55681
+          awsxray:
+            endpoint: 0.0.0.0:2000
+            transport: udp
+          statsd:
+            endpoint: 0.0.0.0:8125
+            aggregation_interval: 60s
+          awsecscontainermetrics:
+            collection_interval: 60s
+
+        processors:
+          filter:
+            metrics:
+              include:
+                match_type: strict
+                metric_names:
+                  - ecs.task.memory.utilized
+                  - ecs.task.memory.reserved
+                  - ecs.task.cpu.utilized
+                  - ecs.task.cpu.reserved
+                  - ecs.task.network.rate.rx
+                  - ecs.task.network.rate.tx
+                  - ecs.task.storage.read_bytes
+                  - ecs.task.storage.write_bytes
+
+        exporters:
+          logging:
+            loglevel: info
+          awsxray:
+            region: ${AWS::Region}
+          awsemf:
+            region: ${AWS::Region}
+          awsprometheusremotewrite:
+            endpoint: ${PrometheusEndpoint}api/v1/remote_write
+            aws_auth:
+              region: ${AWS::Region}
+              service: "aps"
+
+        service:
+          pipelines:
+            traces:
+              receivers: [ otlp ]
+              exporters: [ awsxray ]
+            metrics:
+              receivers: [ otlp ]
+              exporters: [ awsemf, awsprometheusremotewrite ]
+
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${AWS::StackName}-alb
+      SecurityGroupIngress:
+        - CidrIp: !Ref VpcCIDR
+          IpProtocol: TCP
+          FromPort: !FindInMap [ Otel, Ports, grpc]
+          ToPort: !FindInMap [ Otel, Ports, grpc]
+        - CidrIp: !Ref VpcCIDR
+          IpProtocol: TCP
+          FromPort: !FindInMap [ Otel, Ports, xray]
+          ToPort: !FindInMap [ Otel, Ports, xray]
+        - CidrIp: !Ref VpcCIDR
+          IpProtocol: TCP
+          FromPort: !FindInMap [ Otel, Ports, stastd]
+          ToPort: !FindInMap [ Otel, Ports, stastd]
+      VpcId: !Ref VpcId
+      Tags:
+        - Key: Name
+          Value: !Sub ${AppName}-ecs-${AWS::StackName}
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: !Sub ${AppName}-task-policy-${AWS::StackName}
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: "*"
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+      Policies:
+          - PolicyName: !Sub ${AppName}-task-policy-${AWS::StackName}
+            PolicyDocument:
+              Version: 2012-10-17
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - logs:PutLogEvents
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:DescribeLogStreams
+                    - logs:DescribeLogGroups
+                    - xray:PutTraceSegments
+                    - xray:PutTelemetryRecords
+                    - xray:GetSamplingRules
+                    - xray:GetSamplingTargets
+                    - xray:GetSamplingStatisticSummaries
+                    - ssm:GetParameters
+                  Resource: "*"
+                - Effect: Allow
+                  Action:
+                    - aps:RemoteWrite
+                  Resource: "*"
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /ecs/${AppName}
+      RetentionInDays: 14
+
+  FargateService:
+    Type: AWS::ECS::Service
+    Properties:
+      ServiceName: !Sub ${AppName}-service-${AWS::StackName}
+      Cluster: !Ref Cluster
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref TaskDefinition
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref SecurityGroup
+          Subnets: !Ref Subnets
+      ServiceRegistries:
+        - RegistryArn: !GetAtt DiscoveryService.Arn
+          ContainerName: !Ref AppName
+
+  DiscoveryService:
+    Type: AWS::ServiceDiscovery::Service
+    Properties:
+      Description: Discovery Service for the Otel Application
+      DnsConfig:
+        NamespaceId: !Ref PrivateNamespaceId
+        RoutingPolicy: MULTIVALUE
+        DnsRecords:
+          - TTL: 60
+            Type: A
+      HealthCheckCustomConfig:
+        FailureThreshold: 3
+      Name: !Ref AppName
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub ${AppName}-taskdef-${AWS::StackName}
+      RequiresCompatibilities:
+        - FARGATE
+      Memory: 512
+      Cpu: 256
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: !Ref AppName
+          Image: public.ecr.aws/aws-observability/aws-otel-collector:v0.12.0
+          Essential: true
+          Memory: 512
+          PortMappings:
+            - ContainerPort: !FindInMap [ Otel, Ports, grpc]
+            - ContainerPort: !FindInMap [ Otel, Ports, xray]
+            - ContainerPort: !FindInMap [ Otel, Ports, stastd]
+          Secrets:
+            - Name: AOT_CONFIG_CONTENT
+              ValueFrom: !Ref AotConfigParameter
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix: ecs
+
+
+Outputs:
+  Service:
+    Value: !Ref FargateService

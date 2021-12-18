@@ -97,7 +97,7 @@ Resources:
       ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
       ContainerDefinitions:
         - Name: !Ref AppName
-          Image: utsabroy86/springboot-otel-sample:latest # Image is created using Docker file and pushed to Docker hub to allow CF to create the service
+          Image: public.ecr.aws/k6l7p5n0/springboot-otel-sample:latest # Image created using DockerFile
           Essential: true
           Memory: 512
           PortMappings:
